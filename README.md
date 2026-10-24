@@ -28,7 +28,7 @@ Contraseñas y tokens se pasan como `SecretStr`, así que la UI de Prefect los m
 
 Comandos para **CMD**. En PowerShell, cambia `.venv\Scripts\activate.bat` por `.\.venv\Scripts\Activate.ps1`. Tras activar, el prompt debe empezar con `(.venv)`.
 
-```bat
+```powershell
 cd backend-prefect
 py -m venv .venv
 .venv\Scripts\activate.bat
