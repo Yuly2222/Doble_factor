@@ -13,6 +13,7 @@
 | **Process Manager / Estados** | `DISABLED → PENDING_VERIFICATION` al generar el QR; `PENDING_VERIFICATION → ACTIVE` solo con el primer código válido. Con 2FA `ACTIVE` no se puede re-aprovisionar. (`flows.py`) |
 | **Strategy** | `SecondFactorStrategy` con `TOTPStrategy` (ventanas C-1, C, C+1) y `BackupCodeStrategy` (8 códigos de un solo uso, guardados como SHA-256). (`strategies.py`) |
 | **Anti-Replay** | Caché en memoria `(user_id, código)` con TTL de 90 s. (`flows.py`) |
+| **Secreto cifrado en reposo** | `totp_secret` se guarda en Supabase cifrado con **AES-256-GCM** (`v1:...`), con el `id` del usuario como dato asociado. La clave `TOTP_ENC_KEY` solo vive en el `.env`. (`db.py`) |
 
 Flows de Prefect: `login-flow`, `provision-2fa-flow` y `verify-2fa-flow`. Este último tiene las 4 tareas de la guía:
 `validate_pre_auth_state → check_anti_replay_cache → execute_mfa_strategy → issue_elevated_session`.
@@ -36,8 +37,15 @@ pip install -r requirements.txt
 copy .env.example .env
 ```
 
-Luego abre `.env` y rellena `SUPABASE_URL`, `SUPABASE_KEY` y `JWT_SECRET`.
+Luego abre `.env` y rellena `SUPABASE_URL`, `SUPABASE_KEY`, `JWT_SECRET` y `TOTP_ENC_KEY`.
 `SUPABASE_URL` debe ser solo `https://<proyecto>.supabase.co`, **sin** `/rest/v1` al final.
+Para generar `TOTP_ENC_KEY` (clave AES-256):
+
+```bat
+py -c "import os,base64;print(base64.b64encode(os.urandom(32)).decode())"
+```
+
+> Si pierdes `TOTP_ENC_KEY`, las semillas guardadas no se pueden descifrar y los usuarios deben volver a escanear el QR. Si tenías semillas guardadas en texto plano de una versión anterior, cífralas una vez con `python encrypt_existing_secrets.py`.
 
 Terminal 1, servidor de Prefect (UI en http://127.0.0.1:4200):
 
@@ -135,7 +143,15 @@ En el emulador (sin cámara), pega la semilla Base32 que muestra la web.
   - `TOTPStrategy`: valida el código en las ventanas `C-1`, `C` y `C+1`, con comparación de tiempo constante (`hmac.compare_digest`).
   - `BackupCodeStrategy`: 8 códigos de emergencia de un solo uso. Se guardan como hash SHA-256 y se borran al usarse.
   - Las estrategias son intercambiables: `execute_mfa_strategy` elige la estrategia en el diccionario `STRATEGIES` según el campo `method` (`"totp"` o `"backup"`), sin `if` por tipo.
-- **Seguridad adicional:** contraseñas con PBKDF2-SHA256 (200 000 iteraciones, sal aleatoria). La clave `service_role` de Supabase solo vive en el backend, y la tabla tiene RLS activado sin políticas públicas.
+- **Protección de secretos en la base de datos:**
+
+  | Dato | Protección | Por qué |
+  |---|---|---|
+  | Contraseña | Hash PBKDF2-SHA256, 200 000 iteraciones, sal aleatoria | Solo hay que compararla, nunca recuperarla |
+  | Códigos de respaldo | Hash SHA-256 | Igual: solo se comparan |
+  | Semilla TOTP | **Cifrado AES-256-GCM** ([db.py](backend-prefect/db.py)) | El servidor necesita el valor original para calcular el HMAC, así que no puede ser un hash. Se cifra al escribir y se descifra al leer, dentro de `db.py`, así que ninguna otra parte del código puede guardarla en claro. GCM detecta cualquier alteración, y el `id` del usuario va como dato asociado: una semilla cifrada copiada a otra fila no se descifra. |
+
+  La clave `TOTP_ENC_KEY` y la `service_role` de Supabase solo viven en el `.env` del backend. La tabla tiene RLS activado sin políticas públicas. RLS solo controla quién accede a la tabla; si la base de datos se filtrara, el cifrado hace que las semillas sigan sin poder usarse.
 
 ### 3. Idempotencia y prevención de replay attacks (15%)
 

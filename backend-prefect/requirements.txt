@@ -5,3 +5,4 @@ supabase
 pyjwt
 qrcode
 python-dotenv
+cryptography
