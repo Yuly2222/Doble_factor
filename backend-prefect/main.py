@@ -1,3 +1,4 @@
+import logging
 from pathlib import Path
 from typing import Literal
 
@@ -15,7 +16,10 @@ from pydantic import BaseModel, Field, SecretStr
 from flows import ReplayAttackDetected, login_flow, provision_2fa_flow, register_user, verify_2fa_flow
 from security import AuthError, decode_token
 
-app = FastAPI(title="2FA TOTP Step-Up + Prefect")
+# Prefect sube el logger "uvicorn" a WARNING al importarse; sin esto no se ve "Uvicorn running on ...".
+logging.getLogger("uvicorn").setLevel(logging.INFO)
+
+app =FastAPI(title="2FA TOTP Step-Up + Prefect")
 
 
 class Credentials(BaseModel):
