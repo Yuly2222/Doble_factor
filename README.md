@@ -26,10 +26,10 @@ Contraseñas y tokens se pasan como `SecretStr`, así que la UI de Prefect los m
 
 ## 2. Backend + Prefect (Windows PowerShell)
 
-```powershell
+```CMD
 cd backend-prefect
 py -m venv .venv
-.\.venv\Scripts\Activate.ps1
+.venv\Scripts\activate.bat
 pip install -r requirements.txt
 copy .env.example .env      # rellena SUPABASE_URL, SUPABASE_KEY y JWT_SECRET
 ```
