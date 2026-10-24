@@ -19,7 +19,7 @@ app = FastAPI(title="2FA TOTP Step-Up + Prefect")
 
 
 class Credentials(BaseModel):
-    username: str = Field(min_length=3, max_length=50, pattern=r"^[A-Za-z0-9_.-]+$")
+    username: str = Field(min_length=3, max_length=254, pattern=r"^[A-Za-z0-9_.+@-]+$")  # usuario o correo
     password: SecretStr = Field(min_length=6, max_length=128)
 
 

@@ -24,27 +24,33 @@ Contraseñas y tokens se pasan como `SecretStr`, así que la UI de Prefect los m
 2. En el **SQL Editor**, ejecuta `backend-prefect/schema.sql`.
 3. En **Project Settings → API**, copia la `Project URL` y la clave `service_role`.
 
-## 2. Backend + Prefect (Windows PowerShell)
+## 2. Backend + Prefect (Windows)
 
-```powershell
+Comandos para **CMD**. En PowerShell, cambia `.venv\Scripts\activate.bat` por `.\.venv\Scripts\Activate.ps1`. Tras activar, el prompt debe empezar con `(.venv)`.
+
+```bat
 cd backend-prefect
 py -m venv .venv
-.\.venv\Scripts\Activate.ps1
+.venv\Scripts\activate.bat
 pip install -r requirements.txt
-copy .env.example .env      # rellena SUPABASE_URL, SUPABASE_KEY y JWT_SECRET
+copy .env.example .env
 ```
+
+Luego abre `.env` y rellena `SUPABASE_URL`, `SUPABASE_KEY` y `JWT_SECRET`.
 
 Terminal 1, servidor de Prefect (UI en http://127.0.0.1:4200):
 
-```powershell
-.\.venv\Scripts\Activate.ps1
+```bat
+cd backend-prefect
+.venv\Scripts\activate.bat
 prefect server start
 ```
 
 Terminal 2, API + web:
 
-```powershell
-.\.venv\Scripts\Activate.ps1
+```bat
+cd backend-prefect
+.venv\Scripts\activate.bat
 uvicorn main:app --host 0.0.0.0 --port 8000
 ```
 
@@ -54,7 +60,7 @@ Autoprueba del algoritmo TOTP con los vectores de la RFC 6238: `python strategie
 
 ## 3. App móvil (Expo)
 
-```powershell
+```bat
 cd mobile-authenticator
 npm install
 npx expo install --fix
