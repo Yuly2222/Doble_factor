@@ -1,0 +1,7 @@
+fastapi
+uvicorn
+prefect>=3
+supabase
+pyjwt
+qrcode
+python-dotenv

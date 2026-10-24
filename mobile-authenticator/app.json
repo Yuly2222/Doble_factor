@@ -1,0 +1,13 @@
+{
+  "expo": {
+    "name": "Mi Authenticator",
+    "slug": "mobile-authenticator",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "dark",
+    "plugins": [
+      ["expo-camera", { "cameraPermission": "Se usa la cámara para escanear el QR de 2FA." }],
+      "expo-secure-store"
+    ]
+  }
+}

@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Login 2FA</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 460px; margin: 2rem auto; padding: 0 1rem; color: #1b1b1f; background: #f6f6f8; }
+  section { background: #fff; border-radius: 12px; padding: 1.25rem; margin-bottom: 1rem; box-shadow: 0 1px 3px #0002; }
+  input, select, button { font: inherit; width: 100%; box-sizing: border-box; padding: .6rem; margin: .3rem 0; border-radius: 8px; border: 1px solid #ccc; }
+  button { background: #3b5bdb; color: #fff; border: 0; cursor: pointer; }
+  button.alt { background: #868e96; }
+  #code { font-size: 1.6rem; letter-spacing: .3rem; text-align: center; }
+  #qr svg { width: 220px; height: 220px; display: block; margin: auto; }
+  code, pre { background: #f1f3f5; padding: .15rem .35rem; border-radius: 4px; word-break: break-all; white-space: pre-wrap; }
+  #msg { padding: .6rem; border-radius: 8px; }
+  .ok { background: #d3f9d8; } .err { background: #ffe3e3; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<h1>🔐 Login con 2FA</h1>
+<div id="msg" hidden></div>
+
+<section id="s-login">
+  <h2>1. Usuario y contraseña</h2>
+  <input id="user" placeholder="usuario" autocomplete="username">
+  <input id="pass" type="password" placeholder="contraseña" autocomplete="current-password">
+  <button onclick="login()">Iniciar sesión</button>
+  <button class="alt" onclick="register()">Registrarme</button>
+</section>
+
+<section id="s-setup" hidden>
+  <h2>2. Activar 2FA</h2>
+  <p>Tu 2FA no está activo. Genera el QR y escanéalo con tu app.</p>
+  <button onclick="setup()">Generar QR</button>
+  <div id="qr-box" hidden>
+    <div id="qr"></div>
+    <p>Semilla Base32 (para pegar en el emulador): <code id="secret"></code></p>
+    <p>Códigos de respaldo (guárdalos, un solo uso): <code id="backup"></code></p>
+    <p>Estado: <b>PENDING_VERIFICATION</b>. Envía tu primer código para activarlo.</p>
+  </div>
+</section>
+
+<section id="s-verify" hidden>
+  <h2>3. Segundo factor</h2>
+  <select id="method">
+    <option value="totp">Código TOTP (app)</option>
+    <option value="backup">Código de respaldo</option>
+  </select>
+  <input id="code" inputmode="numeric" maxlength="12" placeholder="123456" autocomplete="one-time-code">
+  <button onclick="verify()">Verificar</button>
+</section>
+
+<section id="s-vault" hidden>
+  <h2>4. Ruta protegida</h2>
+  <button onclick="vault()">GET /api/boveda-secreta</button>
+  <pre id="vault-out"></pre>
+</section>
+
+<script>
+let preAuth = null, access = null;
+const $ = id => document.getElementById(id);
+
+function show(text, ok) {
+  $('msg').hidden = false;
+  $('msg').className = ok ? 'ok' : 'err';
+  $('msg').textContent = text;
+}
+
+async function api(path, body, token) {
+  const res = await fetch(path, {
+    method: body ? 'POST' : 'GET',
+    headers: { 'Content-Type': 'application/json', ...(token && { Authorization: 'Bearer ' + token }) },
+    body: body && JSON.stringify(body),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(typeof data.detail === 'string' ? data.detail : JSON.stringify(data.detail ?? res.status));
+  return data;
+}
+
+const creds = () => ({ username: $('user').value.trim(), password: $('pass').value });
+
+async function register() {
+  try { await api('/auth/register', creds()); show('Usuario creado. Ahora inicia sesión.', true); }
+  catch (e) { show(e.message); }
+}
+
+async function login() {
+  try {
+    const r = await api('/auth/login', creds());
+    preAuth = r.pre_auth_token;
+    show(`pre_auth_token recibido (solo sirve para /auth/verify-2fa). Estado 2FA: ${r.mfa_status}`, true);
+    $('s-setup').hidden = r.mfa_status === 'ACTIVE';
+    $('s-verify').hidden = r.mfa_status === 'DISABLED';
+  } catch (e) { show(e.message); }
+}
+
+async function setup() {
+  try {
+    const r = await api('/auth/2fa/setup', { pre_auth_token: preAuth });
+    $('qr').innerHTML = r.qr_svg;  // SVG generado por nuestro backend
+    $('secret').textContent = r.secret;
+    $('backup').textContent = r.backup_codes.join('  ');
+    $('qr-box').hidden = false;
+    $('s-verify').hidden = false;
+    show('QR generado. Estado: PENDING_VERIFICATION', true);
+  } catch (e) { show(e.message); }
+}
+
+async function verify() {
+  try {
+    const r = await api('/auth/verify-2fa', { pre_auth_token: preAuth, code: $('code').value, method: $('method').value });
+    access = r.access_token;
+    $('s-setup').hidden = true;
+    $('s-vault').hidden = false;
+    show('✅ access_token emitido con mfa_verified: true', true);
+  } catch (e) { show(e.message); }
+}
+
+async function vault() {
+  try { $('vault-out').textContent = JSON.stringify(await api('/api/boveda-secreta', null, access), null, 2); }
+  catch (e) { show(e.message); }
+}
+</script>
+</body>
+</html>
