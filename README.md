@@ -28,7 +28,7 @@ Contraseñas y tokens se pasan como `SecretStr`, así que la UI de Prefect los m
 
 Comandos para **CMD**. En PowerShell, cambia `.venv\Scripts\activate.bat` por `.\.venv\Scripts\Activate.ps1`. Tras activar, el prompt debe empezar con `(.venv)`.
 
-```powershell
+```bat
 cd backend-prefect
 py -m venv .venv
 .venv\Scripts\activate.bat
@@ -37,6 +37,7 @@ copy .env.example .env
 ```
 
 Luego abre `.env` y rellena `SUPABASE_URL`, `SUPABASE_KEY` y `JWT_SECRET`.
+`SUPABASE_URL` debe ser solo `https://<proyecto>.supabase.co`, **sin** `/rest/v1` al final.
 
 Terminal 1, servidor de Prefect (UI en http://127.0.0.1:4200):
 
@@ -73,14 +74,101 @@ En el emulador (sin cámara), pega la semilla Base32 que muestra la web.
 
 ## Guion de la demo
 
-1. **Paridad**: en la web, regístrate → inicia sesión → **Generar QR**. Escanea el QR con esta app y con Google/Microsoft Authenticator: las dos muestran el mismo código.
-2. **Modo avión**: activa el modo avión, espera a que cambie la ventana de 30 s, verifica el código (el estado pasa a `ACTIVE`) → **GET /api/boveda-secreta**.
-3. **Replay**: vuelve a pulsar **Verificar** con el mismo código → HTTP 409. En Prefect, `verify-2fa-flow` aparece **Failed** en `check_anti_replay_cache`.
-4. **Desfase de reloj / respaldo**: el log de `execute_mfa_strategy` indica la ventana (`C-1`, `C` o `C+1`) donde coincidió el código. También puedes elegir *Código de respaldo* y usar uno de los 8 códigos.
+1. **Paridad**: en la web, regístrate (usuario o correo) → inicia sesión → **Generar código QR**. Escanea el QR con esta app y con Google/Microsoft Authenticator: las dos muestran el mismo código.
+2. **Modo avión**: activa el modo avión, espera a que cambie la ventana de 30 s, pulsa **Ya lo escaneé, continuar**, escribe el código (el estado pasa a `ACTIVE`) → **Abrir /api/boveda-secreta**.
+3. **Replay**: en la tarjeta *Acceso concedido*, pulsa **Reenviar el mismo código** → HTTP 409 `ReplayAttackDetected`. En Prefect, `verify-2fa-flow` aparece **Failed** en `check_anti_replay_cache`.
+4. **Desfase de reloj / respaldo**: el log de `execute_mfa_strategy` indica la ventana (`C-1`, `C` o `C+1`) donde coincidió el código. También puedes pulsar *Usar un código de respaldo* y usar uno de los 8 códigos.
 
-> Para volver a iniciar sesión, primero pulsa *Iniciar sesión* (un nuevo `pre_auth_token`) y luego verifica con un código nuevo.
+> El QR solo se muestra mientras el 2FA no está `ACTIVE`. Para repetir la demo de paridad, reinícialo en Supabase:
+> `update users set mfa_status = 'DISABLED' where username = '<tu usuario>';`
+
+## Problemas comunes
+
+| Síntoma | Causa y solución |
+|---|---|
+| `"pip" no se reconoce...` | Estás en CMD y usaste `Activate.ps1`. Usa `.venv\Scripts\activate.bat`. |
+| `Error 500` al registrarse | `SUPABASE_URL` termina en `/rest/v1`. Quítalo y reinicia uvicorn. |
+| uvicorn se cierra sin mensaje | El puerto 8000 está ocupado por otro uvicorn. Ciérralo o usa `--port 8001`. |
 
 ## Límites (PoC)
 
 - La caché anti-replay vive en el proceso: ejecuta uvicorn con un solo worker. Con varios workers haría falta Redis (`SET NX EX 90`).
 - Sin rate limiting en `/auth/verify-2fa`. Para producción, conviene bloquear tras N intentos fallidos.
+
+---
+
+## Cumplimiento de la rúbrica
+
+### 1. Implementación criptográfica TOTP en la app móvil (30%)
+
+> *La app calcula el código de 6 dígitos desde cero (HMAC-SHA1 + truncamiento dinámico) cada 30 s sin conexión y coincide con Google/Microsoft Authenticator.*
+
+- **Sin librerías TOTP.** [mobile-authenticator/totp.js](mobile-authenticator/totp.js) no usa `otplib`, `speakeasy` ni equivalentes. La guía permitía usar librerías para HMAC-SHA1 y Base32, pero aquí **también se escribieron a mano**:
+  - `base32Decode`: decodifica la semilla a bytes `K`.
+  - `sha1` y `hmacSha1`: SHA-1 (FIPS 180) y HMAC (RFC 2104) completos.
+  - `hotp`: empaqueta `C` como entero de 8 bytes Big-Endian, calcula `HMAC-SHA1(K, C)`, toma `offset = hash[19] & 0x0f`, extrae 4 bytes, aplica `& 0x7f` al primero, `% 1000000` y rellena con ceros.
+  - `totp`: `C = floor(UnixTime / 30)`.
+- **Ingesta del secreto** ([App.js](mobile-authenticator/App.js)):
+  - escaneo del QR con `expo-camera`, extrayendo `secret` de la URI `otpauth://totp/...`;
+  - o un campo de texto para pegar la semilla Base32 (útil en el emulador).
+  - La semilla se guarda en el almacenamiento cifrado del sistema (`expo-secure-store`).
+- **Interfaz:** código de 6 dígitos en grande, barra de progreso y cuenta regresiva de 30 a 0 s, y regeneración automática al cambiar la ventana. Se muestra también el contador `C` actual.
+- **Sin conexión:** la app no hace ninguna llamada de red, así que funciona en modo avión.
+- **Verificación:** `npm test` ([totp.test.mjs](mobile-authenticator/totp.test.mjs)) compara contra los vectores oficiales de la RFC 6238 (T = 59, 1111111109, 1234567890, 2000000000, 20000000000) y de la RFC 2202 (HMAC-SHA1). Al pasar los vectores del estándar, el código coincide con Google/Microsoft Authenticator (prueba de paridad de la demo).
+
+### 2. Patrones arquitectónicos: Step-Up, Strategy, Estado (30%)
+
+> *Estado `PENDING_VERIFICATION`, separación entre pre-auth token y access token, y patrón Strategy para el segundo factor.*
+
+- **Máquina de estados / Process Manager** ([flows.py](backend-prefect/flows.py), columna `mfa_status` en [schema.sql](backend-prefect/schema.sql)):
+  - `DISABLED → PENDING_VERIFICATION`: `provision-2fa-flow` genera una semilla de 160 bits y 8 códigos de respaldo, y deja la configuración pendiente.
+  - `PENDING_VERIFICATION → ACTIVE`: solo cuando llega el **primer código válido** (`issue_elevated_session`). Si el usuario genera el QR y nunca lo escanea, su cuenta no queda bloqueada.
+  - Con 2FA `ACTIVE` no se puede re-aprovisionar: quien solo tenga la contraseña no puede registrar su propio teléfono.
+  - Cada transición queda en los logs de Prefect (`Transición de estado: X -> Y`).
+  - La base de datos solo admite esos tres estados (`check` en `schema.sql`).
+- **Step-Up Authentication** ([security.py](backend-prefect/security.py), [main.py](backend-prefect/main.py)):
+  - `POST /auth/login` devuelve **solo** un `pre_auth_token` (JWT con `scope: "pre_auth"`, válido 5 min). Ese token solo sirve para `/auth/2fa/setup` y `/auth/verify-2fa`.
+  - `POST /auth/verify-2fa` devuelve el `access_token` (`scope: "access"`, `mfa_verified: true`, 15 min).
+  - `GET /api/boveda-secreta` rechaza el `pre_auth_token` (401) y exige `mfa_verified: true` (403 si falta).
+- **Strategy Pattern** ([strategies.py](backend-prefect/strategies.py)):
+  - Clase base abstracta `SecondFactorStrategy` con el método `verify(user, code, logger)`.
+  - `TOTPStrategy`: valida el código en las ventanas `C-1`, `C` y `C+1`, con comparación de tiempo constante (`hmac.compare_digest`).
+  - `BackupCodeStrategy`: 8 códigos de emergencia de un solo uso. Se guardan como hash SHA-256 y se borran al usarse.
+  - Las estrategias son intercambiables: `execute_mfa_strategy` elige la estrategia en el diccionario `STRATEGIES` según el campo `method` (`"totp"` o `"backup"`), sin `if` por tipo.
+- **Seguridad adicional:** contraseñas con PBKDF2-SHA256 (200 000 iteraciones, sal aleatoria). La clave `service_role` de Supabase solo vive en el backend, y la tabla tiene RLS activado sin políticas públicas.
+
+### 3. Idempotencia y prevención de replay attacks (15%)
+
+> *Un código válido no puede usarse dos veces dentro de la misma ventana de validez.*
+
+- **`check_anti_replay_cache`** ([flows.py](backend-prefect/flows.py)): consulta una caché en memoria con clave `(user_id, código)`. Si el par se usó en los **últimos 90 s**, lanza `ReplayAttackDetected` y el endpoint responde **HTTP 409**.
+- **Por qué 90 s:** cubre la ventana completa de aceptación (C-1, C y C+1 = 3 × 30 s). Así, un código no puede reutilizarse mientras siga siendo matemáticamente válido.
+- **`issue_elevated_session`** marca el código como usado **solo después** de que la estrategia lo valida. Un código erróneo no consume nada.
+- **Códigos de respaldo:** además de la caché, son de un solo uso permanente, porque se borran de la base de datos.
+- **Demo:** botón *Reenviar el mismo código* en la web.
+
+### 4. Observabilidad y orquestación con Prefect (25%)
+
+> *Pipeline decorado con `@flow` y `@task`, visible en la UI: grafo de ejecución, bloqueos por replay y logs de ventana temporal.*
+
+- **Tres flows** ([flows.py](backend-prefect/flows.py)), uno por cada llamada a la API:
+
+  | Flow | Endpoint | Tareas |
+  |---|---|---|
+  | `login-flow` | `POST /auth/login` | `verify_credentials` → `issue_pre_auth_token` |
+  | `provision-2fa-flow` | `POST /auth/2fa/setup` | `validate_pre_auth_state` → `create_pending_configuration` → `build_provisioning_uri` |
+  | `verify-2fa-flow` | `POST /auth/verify-2fa` | `validate_pre_auth_state` → `check_anti_replay_cache` → `execute_mfa_strategy` → `issue_elevated_session` |
+
+- **Grafo de ejecución:** en la UI de Prefect (http://127.0.0.1:4200 → *Runs*), cada flow muestra sus tareas en orden.
+- **Bloqueo por replay:** el flow queda **Failed** (rojo) exactamente en `check_anti_replay_cache`, con el mensaje `ReplayAttackDetected`.
+- **Logs de ventana temporal** (`get_run_logger()` en `TOTPStrategy`):
+  - `TOTP match en ventana C-1 (contador ..., actual ...)`
+  - `Reloj del celular atrasado ~30s`, o adelantado si coincide en `C+1`.
+- **Datos sensibles fuera de Prefect:** contraseñas y tokens se pasan como `SecretStr`, así que la UI los muestra como `**********`. Las tareas usan `NO_CACHE` y `persist_result=False`, para que Prefect no guarde semillas ni JWT en disco.
+
+### Entregables
+
+- [x] Repositorio con `/mobile-authenticator` y `/backend-prefect`.
+- [x] Este README, con instrucciones para levantar Prefect (`prefect server start`), el backend y la app móvil.
+- [x] Base de datos de usuarios en Supabase ([schema.sql](backend-prefect/schema.sql)).
+- [x] Web de login ([backend-prefect/static/index.html](backend-prefect/static/index.html)).
