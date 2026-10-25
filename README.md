@@ -7,6 +7,77 @@
 
 ## Arquitectura
 
+```mermaid
+flowchart LR
+    subgraph Celular["📱 Celular (sin internet)"]
+        APP["App Authenticator<br/>React Native / Expo<br/>TOTP = HMAC-SHA1(K, T/30)"]
+        SS[("expo-secure-store<br/>semilla K")]
+        APP --- SS
+    end
+
+    subgraph PC["💻 Computador (localhost)"]
+        WEB["Web de login<br/>static/index.html"]
+        subgraph API["Backend FastAPI :8000"]
+            EP["Endpoints<br/>/auth/login<br/>/auth/2fa/setup<br/>/auth/verify-2fa<br/>/api/boveda-secreta"]
+            FL["Flows Prefect<br/>login · provision · verify"]
+            ST["Strategy<br/>TOTPStrategy<br/>BackupCodeStrategy"]
+            RC[("Caché anti-replay<br/>(user_id, código) · 90 s")]
+            DB["db.py<br/>cifra/descifra AES-256-GCM"]
+            ENV[/".env<br/>SUPABASE_KEY · JWT_SECRET<br/>TOTP_ENC_KEY"/]
+            EP --> FL
+            FL --> ST
+            FL --> RC
+            FL --> DB
+            ENV -.-> DB
+            ENV -.-> EP
+        end
+        PRE["Prefect Server :4200<br/>UI: grafo, estados, logs"]
+    end
+
+    SUPA[("☁️ Supabase · tabla users<br/>password_hash (PBKDF2)<br/>totp_secret (AES-256-GCM)<br/>backup_codes (SHA-256)<br/>mfa_status")]
+
+    WEB -- "HTTP / JSON + JWT" --> EP
+    FL -- "estados y logs" --> PRE
+    DB -- "HTTPS (service_role)" --> SUPA
+    WEB -. "QR otpauth://totp (una sola vez)" .-> APP
+    APP -. "el usuario escribe el código de 6 dígitos" .-> WEB
+```
+
+La app y el backend **nunca se comunican**. Comparten la semilla una sola vez (por el QR) y después cada uno calcula el mismo código a partir del reloj.
+
+### Flujo Step-Up (login + segundo factor)
+
+```mermaid
+sequenceDiagram
+    actor U as Usuario
+    participant W as Web
+    participant A as API FastAPI
+    participant P as Prefect (verify-2fa-flow)
+    participant S as Supabase
+    participant M as App móvil
+
+    U->>W: usuario + contraseña
+    W->>A: POST /auth/login
+    A->>S: buscar usuario, comparar hash PBKDF2
+    A-->>W: pre_auth_token (scope pre_auth, 5 min)
+    M->>M: código = TOTP(semilla, hora) · sin red
+    U->>W: escribe el código de 6 dígitos
+    W->>A: POST /auth/verify-2fa (pre_auth_token, código)
+    A->>P: ejecutar flow
+    P->>S: 1. validate_pre_auth_state (verifica JWT, lee usuario y descifra la semilla)
+    P->>P: 2. check_anti_replay_cache
+    alt código ya usado en los últimos 90 s
+        P-->>A: ReplayAttackDetected (flow Failed)
+        A-->>W: 409
+    else código nuevo
+        P->>P: 3. execute_mfa_strategy (TOTP en ventanas C-1, C, C+1 o código de respaldo)
+        P->>P: 4. issue_elevated_session (marca código usado, PENDING → ACTIVE)
+        A-->>W: access_token (scope access, mfa_verified true, 15 min)
+        W->>A: GET /api/boveda-secreta (Bearer access_token)
+        A-->>W: 200 contenido protegido
+    end
+```
+
 | Patrón | Dónde |
 |---|---|
 | **Step-Up Auth** | `POST /auth/login` → `pre_auth_token` (scope `pre_auth`, 5 min, no abre recursos). `POST /auth/verify-2fa` → `access_token` con `mfa_verified: true`. `GET /api/boveda-secreta` exige este último. (`security.py`, `main.py`) |
